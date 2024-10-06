@@ -89,6 +89,7 @@ public:
 	void IdleSound( void );
 	void StartTask( Task_t *pTask );
 	void RunTask ( Task_t *pTask );
+	int	ObjectCaps( void ) { return CSquadMonster :: ObjectCaps() | FCAP_IMPULSE_USE; }
 	void SonicAttack( void );
 	void PrescheduleThink( void );
 	void SetActivity ( Activity NewActivity );
@@ -98,7 +99,16 @@ public:
 	BOOL FCanActiveIdle ( void );
 	Schedule_t *GetScheduleOfType ( int Type );
 	Schedule_t *GetSchedule( void );
-
+	
+	// For following
+	BOOL CanFollow( void );
+	BOOL IsFollowing( void );
+	void StopFollowing( BOOL clearSchedule );
+	void StartFollowing( CBaseEntity *pLeader);
+	void FollowerUse( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
+	
+	void Killed( entvars_t *pevAttacker, int iGib );
+	
 	int	Save( CSave &save ); 
 	int Restore( CRestore &restore );
 
@@ -128,7 +138,7 @@ IMPLEMENT_SAVERESTORE( CHoundeye, CSquadMonster );
 //=========================================================
 int	CHoundeye :: Classify ( void )
 {
-	return	CLASS_ALIEN_MONSTER;
+	return	CLASS_ALIEN_PET;
 }
 
 //=========================================================
@@ -346,6 +356,7 @@ void CHoundeye :: Spawn()
 	m_afCapability		|= bits_CAP_SQUAD;
 
 	MonsterInit();
+	SetUse( &CHoundeye::FollowerUse );
 }
 
 //=========================================================
@@ -889,6 +900,54 @@ void CHoundeye::PrescheduleThink ( void )
 //=========================================================
 // AI Schedules Specific to this monster
 //=========================================================
+Task_t	tlHoundFollow[] =
+{
+	{ TASK_MOVE_TO_TARGET_RANGE,(float)128		},	// Move within 128 of target ent (client)
+	{ TASK_SET_SCHEDULE,		(float)SCHED_TARGET_FACE },
+};
+
+Schedule_t	slHoundFollow[] =
+{
+	{
+		tlHoundFollow,
+		ARRAYSIZE ( tlHoundFollow ),
+		bits_COND_NEW_ENEMY		|
+		bits_COND_LIGHT_DAMAGE	|
+		bits_COND_HEAVY_DAMAGE	|
+		bits_COND_HEAR_SOUND |
+		bits_COND_PROVOKED,
+		bits_SOUND_DANGER,
+		"Follow"
+	},
+};
+
+Task_t	tlHoundFaceTarget[] =
+{
+	{ TASK_SET_ACTIVITY,		(float)ACT_IDLE },
+	{ TASK_FACE_TARGET,			(float)0		},
+	{ TASK_SET_ACTIVITY,		(float)ACT_IDLE },
+	{ TASK_SET_SCHEDULE,		(float)SCHED_TARGET_CHASE },
+};
+
+#define bits_COND_CLIENT_PUSH 0
+
+Schedule_t	slHoundFaceTarget[] =
+{
+	{
+		tlHoundFaceTarget,
+		ARRAYSIZE ( tlHoundFaceTarget ),
+		bits_COND_CLIENT_PUSH	|
+		bits_COND_NEW_ENEMY		|
+		bits_COND_LIGHT_DAMAGE	|
+		bits_COND_HEAVY_DAMAGE	|
+		bits_COND_HEAR_SOUND |
+		bits_COND_PROVOKED,
+		bits_SOUND_DANGER,
+		"FaceTarget"
+	},
+};
+
+
 Task_t	tlHoundGuardPack[] =
 {
 	{ TASK_STOP_MOVING,			(float)0		},
@@ -1130,6 +1189,8 @@ Schedule_t	slHoundCombatFailNoPVS[] =
 
 DEFINE_CUSTOM_SCHEDULES( CHoundeye )
 {
+	slHoundFollow,
+	slHoundFaceTarget,
 	slHoundGuardPack,
 	slHoundRangeAttack,
 	&slHoundRangeAttack[ 1 ],
@@ -1186,6 +1247,10 @@ Schedule_t* CHoundeye :: GetScheduleOfType ( int Type )
 	}
 	switch	( Type )
 	{
+	case SCHED_TARGET_FACE:
+		return slHoundFaceTarget;
+	case SCHED_TARGET_CHASE:
+		return slHoundFollow;
 	case SCHED_IDLE_STAND:
 		{
 			// we may want to sleep instead of stand!
@@ -1260,6 +1325,25 @@ Schedule_t *CHoundeye :: GetSchedule( void )
 {
 	switch	( m_MonsterState )
 	{
+		case MONSTERSTATE_IDLE:
+		{
+			// TODO stop following if enemy exists
+			if ( IsFollowing() )
+			{
+				if ( !m_hTargetEnt->IsAlive() )
+				{
+					// UNDONE: Comment about the recently dead player here?
+					StopFollowing( FALSE );
+					break;
+				}
+				else
+				{
+					return GetScheduleOfType( SCHED_TARGET_FACE );
+				}
+			}
+			
+			break;
+		}
 	case MONSTERSTATE_COMBAT:
 		{
 // dead enemy
@@ -1301,4 +1385,67 @@ Schedule_t *CHoundeye :: GetSchedule( void )
 	}
 
 	return CSquadMonster :: GetSchedule();
+}
+
+//=========================================================
+// CanFollow
+//=========================================================
+BOOL CHoundeye :: CanFollow( void )
+{
+	UTIL_ClientPrintAll( HUD_PRINTCONSOLE, "CHoundeye :: CanFollow()\n" );
+	if ( !IsAlive() )
+		return FALSE;
+	return !IsFollowing();
+};
+//=========================================================
+// IsFollowing
+//=========================================================
+BOOL CHoundeye :: IsFollowing( void )
+{
+	UTIL_ClientPrintAll( HUD_PRINTCONSOLE, "CHoundeye :: IsFollowing()\n" );
+	return m_hTargetEnt != NULL && m_hTargetEnt->IsPlayer();
+}
+//=========================================================
+// StopFollowing
+//=========================================================
+void CHoundeye :: StopFollowing( BOOL clearSchedule )
+{
+	UTIL_ClientPrintAll( HUD_PRINTCONSOLE, "CHoundeye :: StopFollowing()\n" );
+	if ( IsFollowing() )
+		m_hTargetEnt = NULL;
+};
+//=========================================================
+// StartFollowing
+//=========================================================
+void CHoundeye ::StartFollowing( CBaseEntity *pLeader)
+{
+	UTIL_ClientPrintAll( HUD_PRINTCONSOLE, "CHoundeye :: StartFollowing()\n" );
+	m_hTargetEnt = pLeader;
+}
+//=========================================================
+// FollowerUse
+//=========================================================
+void CHoundeye :: FollowerUse( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value )
+{
+	UTIL_ClientPrintAll( HUD_PRINTCONSOLE, "CHoundeye :: FollowerUse()\n" );
+	if ( pCaller != NULL && pCaller->IsPlayer() )
+	{
+		if ( CanFollow() )
+		{
+			//LimitFollowers( pCaller, 1 );
+			StartFollowing( pCaller );
+		}
+		else
+		{
+			StopFollowing( TRUE );
+		}
+	}
+}
+//=========================================================
+// Killed
+//=========================================================
+void CHoundeye :: Killed( entvars_t *pevAttacker, int iGib )
+{
+	SetUse( NULL );	
+	CSquadMonster::Killed( pevAttacker, iGib );
 }
